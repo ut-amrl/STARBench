@@ -155,6 +155,8 @@ class Evaluator:
                                     print(f"🗑️ Deleted: {f}")
                                 except Exception as e:
                                     print(f"⚠️ Failed to delete {f}: {e}")
+        
+        self._task_indices = self._all_task_paths()
                                     
     def __len__(self):
         """Returns the total number of tasks across all groups."""
@@ -164,84 +166,176 @@ class Evaluator:
         return total_tasks
     
     def __iter__(self):
+        for task_t, task_path in self._task_indices:
+            task_m = json.load(open(task_path, 'r'))
+            
+            obs_stream = []
+            for dataname, (_, (start_date, start_time)) in zip(task_m["bagnames"], task_m["bag_time_mapping"]):
+                
+                dt = datetime.strptime(f"{start_date} {start_time}", "%Y-%m-%d %H:%M")
+                dt = dt.replace(tzinfo=timezone.utc)
+                unix_time = dt.timestamp()
+                
+                if dataname not in self.data_metadata:
+                    raise ValueError(f"Data {dataname} not found in data metadata. Please double check data integrity.")
+                data_meta_path = self.data_metadata[dataname]
+                if os.path.exists(data_meta_path):
+                    data_m = json.load(open(data_meta_path, 'r'))   
+                else:
+                    raise FileNotFoundError(f"Data metadata file not found: {data_meta_path}. Please double check data integrity.")
+                
+                for i, dm in enumerate(data_m):
+                    pos = dm["base_position"]
+                    pos = [pos[0], pos[2], pos[1]] # convert from (x, z, y) to (x, y, z)
+                    caption = dm["base_caption"]
+                    caption_embed = dm["base_caption_embedding"]
+                    
+                    frame = dm["start_frame"]
+                    image_path = os.path.join(self.data_dir, dataname, "0", f"Action_{frame}_0_normal.png")
+                    
+                    time = unix_time + float(i)
+                    
+                    obs = {
+                        "time": time,
+                        "position": pos,
+                        "caption": caption,
+                        "caption_embedding": caption_embed,
+                        "image_path": image_path
+                    }
+                    obs_stream.append(obs)
+                
+                if len(task_m["tasks"]) != 1:
+                    raise NotImplementedError("Currently only support single-task loading.")
+                
+            task = task_m["tasks"][0]
+            
+            task_desc = task["task"]
+            target_obj_cls = task["instance_class"]
+            target_obj_uid = task["instance_name"]
+            
+            bagname_current = task["bagname_current"]
+            match = re.match(r'scene(\d+)_', bagname_current)
+            if match:
+                scene_id = int(match.group(1))
+            else:
+                raise ValueError(f"Could not extract scene ID from bagname: {bagname_current}")
+            graph_path = os.path.join(self.data_dir, bagname_current, "0", "graph.json")
+            
+            if task_t == "common_sense":
+                task_family = "common_sense"
+                task_type = None
+            elif "interactive" in task_t:
+                task_family = "interactive"
+                task_type = task_t.replace("_interactive", "")
+            else:
+                task_family = "visible"
+                task_type = task_t
+                
+            task_uid = Path(task_path).stem
+            yield {
+                "task_uid": task_uid,
+                "obs_stream": obs_stream,
+                "task_desc": task_desc,
+                "target_obj_cls": target_obj_cls,
+                "target_obj_uid": target_obj_uid,
+                "scene_id": scene_id,
+                "graph_path": graph_path,
+                "task_family": task_family,
+                "task_type": task_type,
+            }
+                
+    def __getitem__(self, idx: int):
+        """Allows indexing into the Evaluator to get a specific task by index."""
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} out of range for Evaluator with {len(self)} tasks.")
+        
+        task_t, task_path = self._task_indices[idx]
+        task_m = json.load(open(task_path, 'r'))
+            
+        obs_stream = []
+        for dataname, (_, (start_date, start_time)) in zip(task_m["bagnames"], task_m["bag_time_mapping"]):
+            
+            dt = datetime.strptime(f"{start_date} {start_time}", "%Y-%m-%d %H:%M")
+            dt = dt.replace(tzinfo=timezone.utc)
+            unix_time = dt.timestamp()
+            
+            if dataname not in self.data_metadata:
+                raise ValueError(f"Data {dataname} not found in data metadata. Please double check data integrity.")
+            data_meta_path = self.data_metadata[dataname]
+            if os.path.exists(data_meta_path):
+                data_m = json.load(open(data_meta_path, 'r'))   
+            else:
+                raise FileNotFoundError(f"Data metadata file not found: {data_meta_path}. Please double check data integrity.")
+            
+            for i, dm in enumerate(data_m):
+                pos = dm["base_position"]
+                pos = [pos[0], pos[2], pos[1]] # convert from (x, z, y) to (x, y, z)
+                caption = dm["base_caption"]
+                caption_embed = dm["base_caption_embedding"]
+                
+                frame = dm["start_frame"]
+                image_path = os.path.join(self.data_dir, dataname, "0", f"Action_{frame}_0_normal.png")
+                
+                time = unix_time + float(i)
+                
+                obs = {
+                    "time": time,
+                    "position": pos,
+                    "caption": caption,
+                    "caption_embedding": caption_embed,
+                    "image_path": image_path
+                }
+                obs_stream.append(obs)
+            
+            if len(task_m["tasks"]) != 1:
+                raise NotImplementedError("Currently only support single-task loading.")
+            
+        task = task_m["tasks"][0]
+        
+        task_desc = task["task"]
+        target_obj_cls = task["instance_class"]
+        if task_t != "common_sense":
+            target_obj_uid = task["instance_name"]
+        else:
+            target_obj_uid = None
+        
+        bagname_current = task["bagname_current"]
+        match = re.match(r'scene(\d+)_', bagname_current)
+        if match:
+            scene_id = int(match.group(1))
+        else:
+            raise ValueError(f"Could not extract scene ID from bagname: {bagname_current}")
+        graph_path = os.path.join(self.data_dir, bagname_current, "0", "graph.json")
+        
+        if task_t == "common_sense":
+            task_family = "common_sense"
+            task_type = None
+        elif "interactive" in task_t:
+            task_family = "interactive"
+            task_type = task_t.replace("_interactive", "")
+        else:
+            task_family = "visible"
+            task_type = task_t
+            
+        task_uid = Path(task_path).stem
+        return {
+            "task_uid": task_uid,
+            "obs_stream": obs_stream,
+            "task_desc": task_desc,
+            "target_obj_cls": target_obj_cls,
+            "target_obj_uid": target_obj_uid,
+            "scene_id": scene_id,
+            "graph_path": graph_path,
+            "task_family": task_family,
+            "task_type": task_type,
+        }
+        
+    def _all_task_paths(self):
+        paths = []
         for task_t, task_list in self.task_metadata.items():
             for task_path in task_list:
-                task_m = json.load(open(task_path, 'r'))
-                
-                obs_stream = []
-                for dataname, (_, (start_date, start_time)) in zip(task_m["bagnames"], task_m["bag_time_mapping"]):
-                    
-                    dt = datetime.strptime(f"{start_date} {start_time}", "%Y-%m-%d %H:%M")
-                    dt = dt.replace(tzinfo=timezone.utc)
-                    unix_time = dt.timestamp()
-                    
-                    if dataname not in self.data_metadata:
-                        raise ValueError(f"Data {dataname} not found in data metadata. Please double check data integrity.")
-                    data_meta_path = self.data_metadata[dataname]
-                    if os.path.exists(data_meta_path):
-                        data_m = json.load(open(data_meta_path, 'r'))   
-                    else:
-                        raise FileNotFoundError(f"Data metadata file not found: {data_meta_path}. Please double check data integrity.")
-                    
-                    for i, dm in enumerate(data_m):
-                        pos = dm["base_position"]
-                        pos = [pos[0], pos[2], pos[1]] # convert from (x, z, y) to (x, y, z)
-                        caption = dm["base_caption"]
-                        caption_embed = dm["base_caption_embedding"]
-                        
-                        frame = dm["start_frame"]
-                        image_path = os.path.join(self.data_dir, dataname, "0", f"Action_{frame}_0_normal.png")
-                        
-                        time = unix_time + float(i)
-                        
-                        obs = {
-                            "time": time,
-                            "position": pos,
-                            "caption": caption,
-                            "caption_embedding": caption_embed,
-                            "image_path": image_path
-                        }
-                        obs_stream.append(obs)
-                    
-                    if len(task_m["tasks"]) != 1:
-                        raise NotImplementedError("Currently only support single-task loading.")
-                    
-                task = task_m["tasks"][0]
-                
-                task_desc = task["task"]
-                target_obj_cls = task["instance_class"]
-                target_obj_uid = task["instance_name"]
-                
-                bagname_current = task["bagname_current"]
-                match = re.match(r'scene(\d+)_', bagname_current)
-                if match:
-                    scene_id = int(match.group(1))
-                else:
-                    raise ValueError(f"Could not extract scene ID from bagname: {bagname_current}")
-                graph_path = os.path.join(self.data_dir, bagname_current, "0", "graph.json")
-                
-                if task_t == "common_sense":
-                    task_family = "common_sense"
-                    task_type = None
-                elif "interactive" in task_t:
-                    task_family = "interactive"
-                    task_type = task_t.replace("_interactive", "")
-                else:
-                    task_family = "visible"
-                    task_type = task_t
-                    
-                task_uid = Path(task_path).stem
-                yield {
-                    "task_uid": task_uid,
-                    "obs_stream": obs_stream,
-                    "task_desc": task_desc,
-                    "target_obj_cls": target_obj_cls,
-                    "target_obj_uid": target_obj_uid,
-                    "scene_id": scene_id,
-                    "graph_path": graph_path,
-                    "task_family": task_family,
-                    "task_type": task_type,
-                }
+                paths.append((task_t, task_path))
+        return paths
                 
     @staticmethod
     def load_task_metadata(
