@@ -14,6 +14,7 @@ from amrl_msgs.srv import (
     DetectVirtualHomeObjectSrvRequest,
     DetectVirtualHomeObjectSrvResponse,
     OpenVirtualHomeObjectSrv,
+    OpenVirtualHomeObjectSrvResponse,
 )
 from starbench.tracing import trace_call
 
@@ -63,7 +64,7 @@ def pick_by_instance_id(instance_id: str) -> PickObjectSrvResponse:
         print("Service call failed:", e)
         
 @trace_call("open")
-def open_by_instance_id(instance_id: str) -> PickObjectSrvResponse:
+def open_by_instance_id(instance_id: str) -> OpenVirtualHomeObjectSrvResponse:
     """
     Open an object by its instance ID.
     """

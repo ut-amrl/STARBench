@@ -7,17 +7,69 @@ from datetime import datetime, timezone
 import re
 from tqdm import tqdm
 import sys
+import importlib
+import importlib.util
+from typing import Any
 
-import rospy
-import roslib; roslib.load_manifest('amrl_msgs')
-from amrl_msgs.srv import (
-    ChangeVirtualHomeGraphSrv,
-    ChangeVirtualHomeGraphSrvRequest,
-)
+ROS_VERSION = os.environ.get("ROS_VERSION", "").strip()
+if ROS_VERSION == "2":
+    USE_ROS2 = True
+elif ROS_VERSION == "1":
+    USE_ROS2 = False
+else:
+    USE_ROS2 = importlib.util.find_spec("rclpy") is not None
+
+if USE_ROS2:
+    rclpy = importlib.import_module("rclpy")
+    Node = importlib.import_module("rclpy.node").Node
+    ChangeVirtualHomeGraphSrv = importlib.import_module("amrl_msgs.srv").ChangeVirtualHomeGraphSrv
+else:
+    rospy = importlib.import_module("rospy")
+    roslib = importlib.import_module("roslib")
+    roslib.load_manifest("amrl_msgs")
+    amrl_msgs_srv = importlib.import_module("amrl_msgs.srv")
+    ChangeVirtualHomeGraphSrv = amrl_msgs_srv.ChangeVirtualHomeGraphSrv
+    ChangeVirtualHomeGraphSrvRequest = amrl_msgs_srv.ChangeVirtualHomeGraphSrvRequest
+
+_ros2_ctx = {"inited": False, "node": None}
+
+
+def _ensure_ros2_node() -> Any:
+    if not _ros2_ctx["inited"]:
+        rclpy.init(args=None)
+        _ros2_ctx["inited"] = True
+    if _ros2_ctx["node"] is None:
+        _ros2_ctx["node"] = rclpy.create_node("eval_utils")
+    return _ros2_ctx["node"]
+
+
+def _set_virtualhome_scene_ros2(graph_path: str, scene_id: int = None) -> bool:
+    node = _ensure_ros2_node()
+    service_name = "/moma/change_virtualhome_graph"
+    client = node.create_client(ChangeVirtualHomeGraphSrv, service_name)
+    while not client.wait_for_service(timeout_sec=1.0):
+        node.get_logger().info(f"Waiting for service {service_name}...")
+
+    request = ChangeVirtualHomeGraphSrv.Request()
+    request.graph_path = graph_path
+    if scene_id is not None:
+        request.scene_id = scene_id
+
+    future = client.call_async(request)
+    rclpy.spin_until_future_complete(node, future)
+    if future.exception() is not None:
+        print("Service call failed:", future.exception())
+        return False
+    response = future.result()
+    return bool(response.success)
+
 def set_virtulhome_scene(graph_path: str, scene_id: int = None) -> bool:
     """
     Set the virtual home scene by changing the graph.
     """
+    if USE_ROS2:
+        return _set_virtualhome_scene_ros2(graph_path=graph_path, scene_id=scene_id)
+
     rospy.wait_for_service("/moma/change_virtualhome_graph", timeout=10)
     try:
         change_graph_service = rospy.ServiceProxy("/moma/change_virtualhome_graph", ChangeVirtualHomeGraphSrv)
@@ -80,6 +132,7 @@ class Evaluator:
                  task_families: list = ["visible", "interactive", "common_sense"],
                  task_types: list = ["class_based", "attribute_based", "spatial", "spatial_temporal", "spatial_frequentist"],
                  force_rerun: bool = False,
+                 task_uids_to_include: list = None # If specified, only include tasks with these uids
     ):
         """
         Initialize the Evaluator with configuration parameters and load metadata.
@@ -113,7 +166,7 @@ class Evaluator:
         self.task_families = task_families
         self.task_types = task_types
         
-        self.caption_type = ""
+        self.caption_type = caption_type
         if caption_type not in ["oracle", "realistic"]:
             raise ValueError(f"Invalid caption_type: {caption_type}. Must be 'oracle' or 'realistic'.")
         self.captioner_type = captioner_type
@@ -126,7 +179,8 @@ class Evaluator:
             task_file_path=self.task_file, 
             benchmark_dir=self.benchmark_dir,
             task_families=self.task_families,
-            task_types=self.task_types
+            task_types=self.task_types,
+            task_uids_to_include=task_uids_to_include
         )
         self.data_metadata = Evaluator.load_data_metadata(
             data_dir=self.data_dir,
@@ -342,7 +396,9 @@ class Evaluator:
         task_file_path: str, 
         benchmark_dir: str, 
         task_families: list = ["visible", "interactive", "common_sense"], 
-        task_types: list = ["class_based", "attribute_based", "spatial", "spatial_temporal", "spatial_frequentist"]):
+        task_types: list = ["class_based", "attribute_based", "spatial", "spatial_temporal", "spatial_frequentist"],
+        task_uids_to_include: list = None
+    ):
         
         # 1. Initialize allowed keys based on input arguments
         task_groups = []
@@ -365,6 +421,8 @@ class Evaluator:
         # 3. Iterate and populate
         for _, row in df.iterrows():
             uid = row['task_uid']
+            if task_uids_to_include is not None and uid not in task_uids_to_include:
+                continue
             family = row['task_family']
             t_type = row['task_type']
             
