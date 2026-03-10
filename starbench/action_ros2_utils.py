@@ -19,7 +19,8 @@ _ros2_ctx = {"inited": False, "node": None}
 
 def _ensure_ros2() -> Node:
     if not _ros2_ctx["inited"]:
-        rclpy.init(args=None)
+        if not rclpy.ok():
+            rclpy.init(args=None)
         _ros2_ctx["inited"] = True
     if _ros2_ctx["node"] is None:
         _ros2_ctx["node"] = rclpy.create_node("action_ros2_utils")
