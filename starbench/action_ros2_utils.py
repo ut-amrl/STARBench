@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+from functools import wraps
 from typing import List
 
 import rclpy
@@ -16,6 +19,54 @@ from amrl_msgs.srv import (
 from starbench.tracing import trace_call
 
 _ros2_ctx = {"inited": False, "node": None}
+_skill_timing_lock = threading.Lock()
+_skill_timing_print_every = 10
+_skill_timing_stats = {
+    "per_fn": {},
+    "total_calls": 0,
+    "total_time": 0.0,
+}
+
+
+def _print_skill_timing_summary_locked() -> None:
+    total_calls = _skill_timing_stats["total_calls"]
+    total_time = _skill_timing_stats["total_time"]
+    per_fn = _skill_timing_stats["per_fn"]
+
+    overall_avg = (total_time / total_calls) if total_calls else 0.0
+    parts = [f"overall={overall_avg:.3f}s ({total_calls})"]
+
+    for fn_name in sorted(per_fn):
+        fn_calls = per_fn[fn_name]["count"]
+        fn_total = per_fn[fn_name]["total_time"]
+        fn_avg = (fn_total / fn_calls) if fn_calls else 0.0
+        parts.append(f"{fn_name}={fn_avg:.3f}s ({fn_calls})")
+
+    print("[skill_avg] " + " | ".join(parts))
+
+
+def _track_skill_timing(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        t0 = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            dt = time.perf_counter() - t0
+            with _skill_timing_lock:
+                per_fn = _skill_timing_stats["per_fn"]
+                if fn.__name__ not in per_fn:
+                    per_fn[fn.__name__] = {"count": 0, "total_time": 0.0}
+
+                per_fn[fn.__name__]["count"] += 1
+                per_fn[fn.__name__]["total_time"] += dt
+                _skill_timing_stats["total_calls"] += 1
+                _skill_timing_stats["total_time"] += dt
+
+                if _skill_timing_stats["total_calls"] % _skill_timing_print_every == 0:
+                    _print_skill_timing_summary_locked()
+
+    return wrapped
 
 def _ensure_ros2() -> Node:
     if not _ros2_ctx["inited"]:
@@ -38,6 +89,7 @@ def _call_service(node: Node, client, request):
     return future.result()
 
 @trace_call("navigate_then_observe")
+@_track_skill_timing
 def navigate(pos: List[float], theta: float) -> GetImageAtPoseSrv.Response:
     node = _ensure_ros2()
     service_name = "/moma/navigate"
@@ -54,6 +106,7 @@ def navigate(pos: List[float], theta: float) -> GetImageAtPoseSrv.Response:
     return _call_service(node, client, req)
 
 @trace_call("observe")
+@_track_skill_timing
 def observe() -> GetImageSrv.Response:
     node = _ensure_ros2()
     service_name = "/moma/observe"
@@ -64,6 +117,7 @@ def observe() -> GetImageSrv.Response:
     return _call_service(node, client, req)
 
 @trace_call("pick")
+@_track_skill_timing
 def pick_by_instance_id(instance_id: str) -> PickObjectSrv.Response:
     node = _ensure_ros2()
     service_name = "/moma/pick_object"
@@ -75,6 +129,7 @@ def pick_by_instance_id(instance_id: str) -> PickObjectSrv.Response:
     return _call_service(node, client, req)
 
 @trace_call("open")
+@_track_skill_timing
 def open_by_instance_id(instance_id: str) -> OpenVirtualHomeObjectSrv.Response:
     node = _ensure_ros2()
     service_name = "/moma/open_object"
@@ -86,6 +141,7 @@ def open_by_instance_id(instance_id: str) -> OpenVirtualHomeObjectSrv.Response:
     return _call_service(node, client, req)
 
 @trace_call("detect")
+@_track_skill_timing
 def detect_virtual_home_object(query_text: str) -> DetectVirtualHomeObjectSrv.Response:
     node = _ensure_ros2()
     service_name = "/moma/detect_virtual_home_object"
