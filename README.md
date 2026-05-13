@@ -58,7 +58,7 @@ bash scripts/install_starbench.sh
 
 ### 3) Download data and tasks
 ```bash
-bash scripts/download_data.sh
+bash scripts/download.sh
 ```
 This script would download data to `starbench_dta` and `starbench_tasks` by default.
 
