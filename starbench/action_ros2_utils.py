@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from functools import wraps
@@ -18,7 +19,7 @@ from amrl_msgs.srv import (
 
 from starbench.tracing import trace_call
 
-_ros2_ctx = {"inited": False, "node": None}
+_ros2_ctx = {"inited": False, "nodes": {}, "executors": {}, "clients": {}}
 _skill_timing_lock = threading.Lock()
 _skill_timing_print_every = 10
 _skill_timing_stats = {
@@ -42,7 +43,8 @@ def _print_skill_timing_summary_locked() -> None:
         fn_avg = (fn_total / fn_calls) if fn_calls else 0.0
         parts.append(f"{fn_name}={fn_avg:.3f}s ({fn_calls})")
 
-    print("[skill_avg] " + " | ".join(parts))
+    sys.stdout.write("\n[skill_avg] " + " | ".join(parts) + "\n")
+    sys.stdout.flush()
 
 
 def _track_skill_timing(fn):
@@ -68,33 +70,52 @@ def _track_skill_timing(fn):
 
     return wrapped
 
-def _ensure_ros2() -> Node:
+def _ensure_ros2(portnum=None) -> Node:
     if not _ros2_ctx["inited"]:
         if not rclpy.ok():
             rclpy.init(args=None)
         _ros2_ctx["inited"] = True
-    if _ros2_ctx["node"] is None:
-        _ros2_ctx["node"] = rclpy.create_node("action_ros2_utils")
-    return _ros2_ctx["node"]
+    if portnum not in _ros2_ctx["nodes"]:
+        node_name = "action_ros2_utils" if portnum is None else f"action_ros2_utils_{portnum}"
+        node = rclpy.create_node(node_name)
+        _ros2_ctx["nodes"][portnum] = node
+        
+        from rclpy.executors import SingleThreadedExecutor
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
+        _ros2_ctx["executors"][portnum] = executor
+    return _ros2_ctx["nodes"][portnum]
 
 def _wait_for_service(node: Node, client, service_name: str) -> None:
     while not client.wait_for_service(timeout_sec=1.0):
         node.get_logger().info(f"Waiting for service {service_name}...")
 
-def _call_service(node: Node, client, request):
+def _get_client(node: Node, srv_type, service_name: str, portnum=None):
+    key = (portnum, service_name)
+    if key not in _ros2_ctx["clients"]:
+        client = node.create_client(srv_type, service_name)
+        _wait_for_service(node, client, service_name)
+        _ros2_ctx["clients"][key] = client
+    return _ros2_ctx["clients"][key]
+
+def _call_service(node: Node, client, request, portnum=None):
     future = client.call_async(request)
-    rclpy.spin_until_future_complete(node, future)
+    if "executors" in _ros2_ctx and portnum in _ros2_ctx["executors"]:
+        _ros2_ctx["executors"][portnum].spin_until_future_complete(future)
+    else:
+        rclpy.spin_until_future_complete(node, future)
+        
     if future.exception() is not None:
         raise future.exception()
     return future.result()
 
 @trace_call("navigate_then_observe")
 @_track_skill_timing
-def navigate(pos: List[float], theta: float) -> GetImageAtPoseSrv.Response:
-    node = _ensure_ros2()
-    service_name = "/moma/navigate"
-    client = node.create_client(GetImageAtPoseSrv, service_name)
-    _wait_for_service(node, client, service_name)
+def navigate(pos: List[float], theta: float, portnum=None) -> GetImageAtPoseSrv.Response:
+    node = _ensure_ros2(portnum)
+    service_prefix = f"moma_{portnum}" if portnum is not None else "moma"
+    service_name = f"/{service_prefix}/navigate"
+    client = _get_client(node, GetImageAtPoseSrv, service_name, portnum=portnum)
 
     req = GetImageAtPoseSrv.Request()
     req.x = float(pos[0])
@@ -103,51 +124,51 @@ def navigate(pos: List[float], theta: float) -> GetImageAtPoseSrv.Response:
         req.z = float(pos[2])
     req.theta = float(theta)
 
-    return _call_service(node, client, req)
+    return _call_service(node, client, req, portnum=portnum)
 
 @trace_call("observe")
 @_track_skill_timing
-def observe() -> GetImageSrv.Response:
-    node = _ensure_ros2()
-    service_name = "/moma/observe"
-    client = node.create_client(GetImageSrv, service_name)
-    _wait_for_service(node, client, service_name)
+def observe(portnum=None) -> GetImageSrv.Response:
+    node = _ensure_ros2(portnum)
+    service_prefix = f"moma_{portnum}" if portnum is not None else "moma"
+    service_name = f"/{service_prefix}/observe"
+    client = _get_client(node, GetImageSrv, service_name, portnum=portnum)
 
     req = GetImageSrv.Request()
-    return _call_service(node, client, req)
+    return _call_service(node, client, req, portnum=portnum)
 
 @trace_call("pick")
 @_track_skill_timing
-def pick_by_instance_id(instance_id: str) -> PickObjectSrv.Response:
-    node = _ensure_ros2()
-    service_name = "/moma/pick_object"
-    client = node.create_client(PickObjectSrv, service_name)
-    _wait_for_service(node, client, service_name)
+def pick_by_instance_id(instance_id: str, portnum=None) -> PickObjectSrv.Response:
+    node = _ensure_ros2(portnum)
+    service_prefix = f"moma_{portnum}" if portnum is not None else "moma"
+    service_name = f"/{service_prefix}/pick_object"
+    client = _get_client(node, PickObjectSrv, service_name, portnum=portnum)
 
     req = PickObjectSrv.Request()
     req.instance_id = instance_id
-    return _call_service(node, client, req)
+    return _call_service(node, client, req, portnum=portnum)
 
 @trace_call("open")
 @_track_skill_timing
-def open_by_instance_id(instance_id: str) -> OpenVirtualHomeObjectSrv.Response:
-    node = _ensure_ros2()
-    service_name = "/moma/open_object"
-    client = node.create_client(OpenVirtualHomeObjectSrv, service_name)
-    _wait_for_service(node, client, service_name)
+def open_by_instance_id(instance_id: str, portnum=None) -> OpenVirtualHomeObjectSrv.Response:
+    node = _ensure_ros2(portnum)
+    service_prefix = f"moma_{portnum}" if portnum is not None else "moma"
+    service_name = f"/{service_prefix}/open_object"
+    client = _get_client(node, OpenVirtualHomeObjectSrv, service_name, portnum=portnum)
 
     req = OpenVirtualHomeObjectSrv.Request()
     req.instance_id = instance_id
-    return _call_service(node, client, req)
+    return _call_service(node, client, req, portnum=portnum)
 
 @trace_call("detect")
 @_track_skill_timing
-def detect_virtual_home_object(query_text: str) -> DetectVirtualHomeObjectSrv.Response:
-    node = _ensure_ros2()
-    service_name = "/moma/detect_virtual_home_object"
-    client = node.create_client(DetectVirtualHomeObjectSrv, service_name)
-    _wait_for_service(node, client, service_name)
+def detect_virtual_home_object(query_text: str, portnum=None) -> DetectVirtualHomeObjectSrv.Response:
+    node = _ensure_ros2(portnum)
+    service_prefix = f"moma_{portnum}" if portnum is not None else "moma"
+    service_name = f"/{service_prefix}/detect_virtual_home_object"
+    client = _get_client(node, DetectVirtualHomeObjectSrv, service_name, portnum=portnum)
 
     req = DetectVirtualHomeObjectSrv.Request()
     req.query_text = query_text
-    return _call_service(node, client, req)
+    return _call_service(node, client, req, portnum=portnum)
