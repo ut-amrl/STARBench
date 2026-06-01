@@ -89,7 +89,25 @@ kill -9 <PID>
 ```
 and restart the container.
 
-### Step 2 - Running the benchmark
+### Step 2 - Start the ROS service
+The container from Step 1 only exposes Unity's HTTP control port. The benchmark drives the simulator through ROS services (`/moma/navigate`, `/moma/observe`, `/moma/change_virtualhome_graph`, ...), so you also need to start the bridge that connects Unity to ROS. Two feature-identical variants are provided — use the one that matches your ROS version:
+
+```bash
+cd virtualhome/virtualhome/starbench
+
+# ROS 1 (rospy — requires a running roscore)
+python start_ros_service.py --port 8080
+
+# ROS 2 (rclpy)
+python start_ros2_service.py --port 8080
+```
+
+Notes:
+- `--port` must match the Unity HTTP port from Step 1.
+- Run the script from the `starbench/` directory shown above — it resolves `../simulation` and `../resources` relative to it.
+- Services are registered under `/moma/...` by default; add `--parallel` to namespace them as `/moma_{port}/...` when running multiple simulators in parallel.
+
+### Step 3 - Running the benchmark
 Checkout `example.py` script for details.
 
 **Plug in your algorithm (replace `BaseRobot`)**:`example.py` uses a BaseRobot(actions=...) placeholder. Replace it with your own robot implementation.
